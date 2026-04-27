@@ -302,6 +302,7 @@ Follow updates:
    Many Parallel Jobs <../running-jobs/many-jobs>
    Model Training Guide <../reference/training-guide>
    Using a Pool of Workers <../examples/pools>
+   Batch Inference <../examples/batch/index>
    Job Groups <../examples/job-groups>
 
 .. toctree::
