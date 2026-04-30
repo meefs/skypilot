@@ -28,6 +28,7 @@ import typing
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Type
 import uuid
 import zipfile
+import zlib
 
 import aiofiles
 import anyio
@@ -2022,14 +2023,18 @@ async def download(download_body: payloads.DownloadBody,
             'X-Home-Path': str(pathlib.Path.home())
         }
 
-        # Return the zip file as a download
+        # Return the zip file as a download. starlette.background.BackgroundTask
+        # (singular) runs after the response body is sent. The earlier
+        # `BackgroundTasks().add_task(...)` form was a bug — `.add_task`
+        # returns None, so the unlink never ran and prepared zips
+        # accumulated on disk per download.
         return fastapi.responses.FileResponse(
             path=zip_path,
             filename=zip_filename,
             media_type='application/zip',
             headers=headers,
-            background=fastapi.BackgroundTasks().add_task(
-                lambda: zip_path.unlink(missing_ok=True)))
+            background=starlette.background.BackgroundTask(zip_path.unlink,
+                                                           missing_ok=True))
     except Exception as e:
         raise fastapi.HTTPException(status_code=500,
                                     detail=f'Error creating zip file: {str(e)}')
@@ -2284,6 +2289,19 @@ async def stream(
     # 'console': console for CLI/API clients
     # pylint: disable=redefined-builtin
     format: Literal['auto', 'plain', 'html', 'console'] = 'auto',
+    # When set, return the stream as an attachment (browser download)
+    # with this filename. Forces plain-text formatting so the saved
+    # file is the raw log content. Use this to download large running
+    # job logs via `<a download href=/api/stream?...>`: bytes start
+    # flowing the moment the underlying request emits its first chunk,
+    # so the user sees the OS save dialog immediately instead of
+    # waiting for sync_down to complete.
+    download: Optional[str] = None,  # pylint: disable=redefined-outer-name
+    # When 'gz', gzip-stream the bytes inline and adjust the saved
+    # filename to end in .gz. Text logs compress ~10-30x, which makes
+    # multi-GB downloads dramatically faster and smaller; macOS Finder
+    # and most Linux file managers auto-extract on open.
+    compress: Optional[Literal['gz']] = None,
 ) -> fastapi.responses.Response:
     """Streams the logs of a request.
 
@@ -2316,8 +2334,13 @@ async def stream(
             raise fastapi.HTTPException(status_code=404,
                                         detail='No request found')
 
-    # Determine if we should use HTML format
-    if format == 'auto':
+    # download mode forces a plain-text streaming response with an
+    # attachment header — the browser saves the bytes to disk as they
+    # arrive instead of rendering them.
+    if download is not None:
+        format = 'plain'
+        use_html = False
+    elif format == 'auto':
         # Check if request is coming from a browser
         user_agent = request.headers.get('user-agent', '').lower()
         use_html = any(browser in user_agent
@@ -2402,6 +2425,18 @@ async def stream(
         headers[server_constants.STREAM_REQUEST_HEADER] = (
             user_supplied_request_id
             if user_supplied_request_id else request_id)
+    if download is not None:
+        # Sanitize the filename to prevent header injection (CR/LF) and
+        # path traversal (slashes, ..). Restrict to a conservative
+        # ASCII set so we don't have to worry about UTF-8 truncation
+        # landing mid-codepoint.
+        safe_filename = re.sub(r'[^A-Za-z0-9._-]+', '_', download)[:200]
+        if not safe_filename:
+            safe_filename = 'download'
+        if compress == 'gz' and not safe_filename.endswith('.gz'):
+            safe_filename = f'{safe_filename}.gz'
+        headers['Content-Disposition'] = (
+            f'attachment; filename="{safe_filename}"')
 
     if request_id is not None:
         content = log_provider.get_log_provider().log_stream(
@@ -2419,9 +2454,56 @@ async def stream(
                                             follow=follow,
                                             polling_interval=polling_interval)
 
+    media_type = 'text/plain'
+    if compress == 'gz':
+        # Gzip-stream the chunks. We do this as PAYLOAD (not transport)
+        # encoding because the browser would decompress the latter
+        # before saving — defeating the bandwidth/disk savings. The
+        # downloaded file is a real .log.gz that double-clicks open
+        # on macOS / extracts trivially with `gunzip` on Linux.
+        media_type = 'application/gzip'
+        # zlib.MAX_WBITS | 16 = gzip wrapper.
+        compressor = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+
+        async def gzipped():
+            # Track whether we ever observed a non-empty source chunk so
+            # the empty-stream signal (used by the SDK to fall back to
+            # the rsync path for terminal jobs) survives gzip framing.
+            # The gzip header alone is ~10 bytes; we suppress it
+            # entirely for an empty source by skipping the trailing
+            # flush() in that case.
+            saw_payload = False
+            try:
+                async for chunk in content:
+                    if isinstance(chunk, str):
+                        chunk_bytes = chunk.encode('utf-8')
+                    else:
+                        chunk_bytes = chunk
+                    if chunk_bytes:
+                        saw_payload = True
+                        compressed = compressor.compress(chunk_bytes)
+                        if compressed:
+                            yield compressed
+            except (asyncio.CancelledError, GeneratorExit):  # pylint: disable=try-except-raise
+                # Client disconnect: PEP 525 forbids yielding while a
+                # GeneratorExit is propagating, so we explicitly do
+                # not run the flush() yield below.
+                raise
+            # Natural EOF only — emit the gzip trailer if we actually
+            # produced anything; otherwise the response stays empty so
+            # the SDK's bytes_written==0 fallback fires.
+            if saw_payload:
+                tail_bytes = compressor.flush()
+                if tail_bytes:
+                    yield tail_bytes
+
+        out_content: Any = gzipped()
+    else:
+        out_content = content
+
     return fastapi.responses.StreamingResponse(
-        content=content,
-        media_type='text/plain',
+        content=out_content,
+        media_type=media_type,
         headers=headers,
     )
 
