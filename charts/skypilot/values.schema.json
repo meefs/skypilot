@@ -839,6 +839,9 @@
                 "annotations": {
                     "type": "object"
                 },
+                "clientsSubPath": {
+                    "type": "string"
+                },
                 "enabled": {
                     "type": "boolean"
                 },
