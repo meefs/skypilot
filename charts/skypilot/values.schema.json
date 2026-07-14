@@ -79,6 +79,13 @@
                         "type": "object"
                     }
                 },
+                "host": {
+                    "type": "string",
+                    "enum": [
+                        "0.0.0.0",
+                        "::"
+                    ]
+                },
                 "image": {
                     "type": "string"
                 },

@@ -2699,8 +2699,10 @@ def api_start(
     Args:
         deploy: Whether to deploy the API server, i.e. fully utilize the
             resources of the machine.
-        host: The host to deploy the API server. It will be set to 0.0.0.0
-            if deploy is True, to allow remote access.
+        host: The host to bind the API server to. Under deploy, the server
+            always binds a wildcard address for remote access: ``::`` when an
+            IPv6 host is given, otherwise ``0.0.0.0``. Without deploy the host
+            is used as-is.
         foreground: Whether to run the API server in the foreground (run in
             the current process).
         metrics: Whether to export metrics of the API server.
@@ -2711,7 +2713,9 @@ def api_start(
         None
     """
     if deploy:
-        host = '0.0.0.0'
+        # Deploy mode is for remote access, so always bind a wildcard of the
+        # requested host's address family.
+        host = '::' if server_common.is_ipv6_host(host) else '0.0.0.0'
     if host not in server_common.AVAILBLE_LOCAL_API_SERVER_HOSTS:
         raise ValueError(f'Invalid host: {host}. Should be one of: '
                          f'{server_common.AVAILBLE_LOCAL_API_SERVER_HOSTS}')

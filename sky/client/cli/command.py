@@ -7862,14 +7862,16 @@ def api():
               help=('Deploy the SkyPilot API server. When set to True, '
                     'SkyPilot API server will use all resources on the host '
                     'machine assuming the machine is dedicated to SkyPilot API '
-                    'server; host will also be set to 0.0.0.0 to allow remote '
-                    'access.'))
+                    'server; host will also be set to a wildcard address '
+                    '(0.0.0.0, or :: when an IPv6 --host is given) '
+                    'to allow remote access.'))
 @click.option('--host',
               default='127.0.0.1',
               type=click.Choice(server_common.AVAILBLE_LOCAL_API_SERVER_HOSTS),
               required=False,
-              help=('The host to deploy the SkyPilot API server. To allow '
-                    'remote access, set this to 0.0.0.0'))
+              help=('The host to bind the SkyPilot API server to. To allow '
+                    'remote access, set this to 0.0.0.0; use :: for IPv6 '
+                    'dual-stack.'))
 @click.option('--foreground',
               is_flag=True,
               default=False,
@@ -7893,7 +7895,10 @@ def api_start(deploy: bool, host: str, foreground: bool,
                   foreground=foreground,
                   enable_basic_auth=enable_basic_auth)
     api_server_url = server_common.get_server_url(host)
-    api_server_info = server_common.get_api_server_status(api_server_url)
+    # Dial via a reachable loopback URL: wildcard bind hosts (0.0.0.0 / ::) are
+    # not valid connect targets on all platforms.
+    api_server_info = server_common.get_api_server_status(
+        server_common.get_local_server_dial_url(host))
     server_common.check_and_print_upgrade_hint(api_server_info, api_server_url)
 
 
